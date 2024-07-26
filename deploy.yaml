@@ -1,0 +1,356 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: database
+  name: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: database
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.version: 1.34.0 (HEAD)
+      labels:
+        io.kompose.service: database
+    spec:
+      containers:
+        - env:
+            - name: MARIADB_USER
+              value: root
+            - name: MARIADB_ROOT_PASSWORD
+              value: rtmpie
+            - name: MARIADB_PASSWORD
+              value: rtmpie
+            - name: MARIADB_DATABASE
+              value: rtmpie
+          image: mariadb:latest
+          name: database
+          ports:
+            - containerPort: 3306
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /var/lib/mysql
+              name: database
+      restartPolicy: Always
+      volumes:
+        - name: database
+          persistentVolumeClaim:
+            claimName: database
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    io.kompose.service: database
+  name: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: database
+  name: database
+spec:
+  ports:
+    - name: "3306"
+      port: 3306
+      targetPort: 3306
+  selector:
+    io.kompose.service: database
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    io.kompose.service: mercure-config
+  name: mercure-config
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    io.kompose.service: mercure-data
+  name: mercure-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: caddy
+  name: caddy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: caddy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.version: 1.34.0 (HEAD)
+      labels:
+        io.kompose.service: caddy
+    spec:
+      containers:
+        - env:
+            - name: MERCURE_EXTRA_DIRECTIVES
+              value: |
+                cors_origins *
+            - name: MERCURE_PUBLISHER_JWT_KEY
+              value: '!changeme!'
+            - name: PUBLISH_ALLOWED_ORIGINS
+              value: '*'
+            - name: CORS_ALLOWED_ORIGINS
+              value: '*'
+            - name: MERCURE_SUBSCRIBER_JWT_KEY
+              value: '!changeme!'
+            - name: SERVER_NAME
+              value: localhost:80
+          image: ghcr.io/ngrie/rtmpie/caddy:latest
+          name: caddy
+          ports:
+            - containerPort: 80
+              protocol: TCP
+            - containerPort: 443
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /data
+              name: mercure-data
+            - mountPath: /config
+              name: mercure-config
+      restartPolicy: Always
+      volumes:
+        - name: mercure-data
+          persistentVolumeClaim:
+            claimName: mercure-data
+        - name: mercure-config
+          persistentVolumeClaim:
+            claimName: mercure-config
+---
+apiVersion: v1
+data:
+  rtmp_nginx_dev.conf: |
+    user nginx;
+    events {}
+
+    http {
+        server {
+            listen       80;
+
+            location /thumbnails/ {
+                root /var;
+            }
+
+            location /control {
+                rtmp_control all;
+            }
+
+            location /live {
+                flv_live on;
+                chunked_transfer_encoding on;
+
+                add_header 'Access-Control-Allow-Origin' '*';
+                add_header 'Access-Control-Allow-Credentials' 'true';
+            }
+        }
+    }
+
+    rtmp {
+        server {
+            listen 1935;
+            listen [::]:1935 ipv6only=on;
+            drop_idle_publisher 10s;
+
+            application live {
+                live on;
+                record off;
+
+                on_publish http://caddy:80/rtmp-events/publish;
+                on_publish_done http://caddy:80/rtmp-events/publish-done;
+                on_play http://caddy:80/rtmp-events/play;
+                on_play_done http://caddy:80/rtmp-events/play-done;
+
+                recorder preview {
+                    record keyframes;
+                    record_max_frames 4;
+                    record_path /tmp/thumbnail_recordings;
+                    record_interval 20s;
+
+                    exec_record_done ffmpeg -i $path -vcodec png -vframes 1 -an -f rawvideo -s 320x240 -ss 00:00:01 -y /var/thumbnails/$name.png;
+                }
+            }
+        }
+    }
+kind: ConfigMap
+metadata:
+  annotations:
+    use-subpath: "true"
+  labels:
+    io.kompose.service: rtmp
+  name: rtmp-cm0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: caddy
+  name: caddy
+spec:
+  ports:
+    - name: "80"
+      port: 80
+      targetPort: 80
+    - name: "8000"
+      port: 8000
+      targetPort: 8000
+    - name: "443"
+      port: 443
+      targetPort: 443
+  selector:
+    io.kompose.service: caddy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: rtmp
+  name: rtmp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: rtmp
+  template:
+    metadata:
+      annotations:
+        kompose.version: 1.34.0 (HEAD)
+      labels:
+        io.kompose.service: rtmp
+    spec:
+      containers:
+        - image: ghcr.io/ngrie/rtmpie/rtmp:latest
+          name: rtmp
+          ports:
+            - containerPort: 1935
+              protocol: TCP
+            - containerPort: 80
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /etc/nginx/nginx.conf
+              name: rtmp-cm0
+              subPath: nginx.conf
+      restartPolicy: Always
+      volumes:
+        - configMap:
+            items:
+              - key: rtmp_nginx_dev.conf
+                path: nginx.conf
+            name: rtmp-cm0
+          name: rtmp-cm0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: rtmp
+  name: rtmp
+spec:
+  ports:
+    - name: "1935"
+      port: 1935
+      targetPort: 1935
+    - name: "80"
+      port: 80
+      targetPort: 80
+    - name: "8081"
+      port: 8081
+      targetPort: 80
+  selector:
+    io.kompose.service: rtmp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: rtmpie-php
+  name: php
+spec:
+  ports:
+    - name: "9000"
+      port: 9000
+      targetPort: 9000
+  selector:
+    io.kompose.service: rtmpie-php
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.version: 1.34.0 (HEAD)
+  labels:
+    io.kompose.service: rtmpie-php
+  name: rtmpie-php
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: rtmpie-php
+  template:
+    metadata:
+      annotations:
+        kompose.version: 1.34.0 (HEAD)
+      labels:
+        io.kompose.service: rtmpie-php
+    spec:
+      containers:
+        - env:
+            - name: APP_SECRET
+              value: '!ChangeMe!'
+            - name: DATABASE_URL
+              value: mysql://root:rtmpie@database:3306/rtmpie
+            - name: MERCURE_JWT_SECRET
+              value: '!ChangeMe!'
+            - name: MERCURE_PUBLIC_URL
+              value: http://localhost/.well-known/mercure
+          image: ghcr.io/ngrie/rtmpie/php:latest
+          name: rtmpie-php
+      restartPolicy: Always
